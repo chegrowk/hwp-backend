@@ -17,16 +17,8 @@ app.add_middleware(
 def get_hwp_text(file_path):
     f = olefile.OleFileIO(file_path)
     
-    # 1. 문서에 '미리보기 텍스트(PrvText)'가 있으면 이를 우선 사용합니다.
-    # PrvText는 서식/제어문자가 모두 제거된 순수 텍스트(UTF-16LE)이므로 깨진 한자가 나오지 않습니다.
-    if f.exists('PrvText'):
-        stream = f.openstream('PrvText')
-        data = stream.read()
-        f.close()
-        # 텍스트 추출 후 불필요한 공백/줄바꿈 정리
-        return data.decode('utf-16le', errors='ignore').strip()
-    
-    # 2. PrvText가 없는 경우 기존 방식(BodyText 파싱) 사용
+    # PrvText(미리보기 텍스트)는 문서 내용이 길 경우 중간에 잘리므로(일부만 저장됨)
+    # 전체 텍스트를 가져오기 위해 항상 BodyText를 파싱합니다.
     dirs = f.listdir()
     body_sections = [d for d in dirs if d[0] == 'BodyText']
     full_text = ""
@@ -48,12 +40,32 @@ def get_hwp_text(file_path):
             
             if record_type == 67:
                 text_data = unpacked[i+4:i+4+length]
-                full_text += text_data.decode('utf-16le', errors='ignore')
+                # HWP 텍스트 제어문자 처리 (깨진 한자 방지)
+                idx = 0
+                while idx < len(text_data):
+                    if idx + 2 > len(text_data):
+                        break
+                    ch = struct.unpack("<H", text_data[idx:idx+2])[0]
+                    if ch >= 32:
+                        full_text += chr(ch)
+                        idx += 2
+                    elif ch in (10, 13):
+                        full_text += '\n'
+                        idx += 2
+                    elif ch == 9:
+                        full_text += '\t'
+                        idx += 2
+                    else:
+                        # 16바이트 크기를 가지는 제어 문자들 (표, 그림 등)
+                        if ch in (1, 2, 3, 11, 12, 14, 15, 16, 17, 18, 21, 22, 23):
+                            idx += 16
+                        else:
+                            idx += 2
             
             i += 4 + length
             
     f.close()
-    return full_text
+    return full_text.strip()
 
 @app.post("/extract")
 async def extract_hwp(file: UploadFile = File(...)):
